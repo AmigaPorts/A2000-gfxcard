@@ -2,7 +2,7 @@
 // Company: MNT Media and Technology UG
 // Engineer: Lukas F. Hartmann (@mntmn)
 // Create Date:    21:49:19 03/22/2016 
-// Design Name:    Amiga 2000/3000/4000 Graphics Card (VA2000) Revision 1.8.5
+// Design Name:    Amiga 2000/3000/4000 Graphics Card (VA2000) Revision 1.9.0 (2018-07-14)
 // Module Name:    va2000
 // Target Devices: 
 
@@ -87,68 +87,38 @@ output [3:0] TMDS_out_N
 `ifdef SIMULATION
 ,
 input z_sample_clk,
-input vga_clk
+input vga_clk,
+input dcm7_0,
+input dcm7_180,
+output [7:0] vga_r,
+output [7:0] vga_g,
+output [7:0] vga_b,
+output vga_hs,
+output vga_vs
 `endif
 );
 
 reg clk_reset=0;
-
-`ifndef SIMULATION
-clk_wiz_v3_6 DCM(
-  .CLK_IN1(CLK50),
-  
-  .CLK_OUT1(z_sample_clk),
-  .CLK_OUT2(sd_clk),
-  
-  .CLK_OUT3(clk75_unbuffered),
-  .CLK_OUT4(clk40_unbuffered)
-);
-
-reg dcm7_psen = 0;
-reg dcm7_psincdec = 0;
-reg dcm7_rst = 0;
-
-reg [7:0] dcm7_counter = 32;
-
-DCM_SP #(
-  .CLKIN_PERIOD(140.0),
-  .CLKOUT_PHASE_SHIFT("VARIABLE"),
-  .CLKFX_MULTIPLY(2),
-  .CLKDV_DIVIDE(2),
-  // -16, -4 perfect on A2000
-  // 16 perfect on A3000
-  .PHASE_SHIFT(0),
-  .CLKFX_DIVIDE(1))
-dcm7 (
-  .CLKIN(zE7M),
-  .RST(dcm7_rst),
-  .CLKFB(dcm7_0),
-  .CLK0(dcm7_0),
-  .CLK90(dcm7_90),
-  .CLK180(dcm7_180),
-  .CLK270(dcm7_270),
-  .PSCLK(z_sample_clk),
-  .PSEN(dcm7_psen),
-  .PSINCDEC(dcm7_psincdec),
-  .PSDONE(dcm7_psdone)
-);
-
 reg [1:0] vga_clk_sel = 0;
-
-// pixel clock selector
-// 00 == 75mhz
-// 01 == 40mhz
-// 11 == 100mhz
-// #(.CLK_SEL_TYPE("ASYNC"))
-
 reg [1:0] vga_clk_sel0_latch = 0;
 
+//`define ZORRO2
+`define ZORRO3
+//`define PIXCLK_100
+
+`ifndef SIMULATION
+// pixel clock selector
+// 00 == 75mhz or 100mhz
+// 01 == 40mhz
+// #(.CLK_SEL_TYPE("ASYNC"))
+
 BUFGMUX vga_clk_mux2(
-  .O(vga_clk), 
+  .O(vga_clk),
   .I0(clk75_unbuffered),
   .I1(clk40_unbuffered),
   .S(vga_clk_sel0_latch[1])
 );
+`endif
 
 // sd card interface
 reg sd_reset = 0;
@@ -171,6 +141,7 @@ reg [15:0] sd_error_sync;
 reg sd_busy_sync;
 reg sd_handshake_out_sync;
 
+`ifndef SIMULATION
 SdCardCtrl sdcard(
   .clk_i(sd_clk),
   .reset_i(sd_reset),
@@ -192,7 +163,6 @@ SdCardCtrl sdcard(
   .hndShk_i(sd_handshake_in),
   .hndShk_o(sd_handshake_out)
 );
-
 `endif
 
 reg  sdram_reset = 0;
@@ -206,12 +176,11 @@ wire sdram_btb;
 reg  [15:0] ram_data_in;
 reg  [15:0] ram_data_in_next;
 reg  ram_write = 0;
-reg  ram_burst = 0;
-reg  ram_write_burst = 0;
+reg  [2:0] ram_burst_size = 0;
 reg  [1:0]  ram_byte_enable;
 
-parameter FETCHW = 1024;
-reg  [15:0] fetch_buffer [0:(FETCHW+40)];
+parameter FETCHW = 512;
+reg  [15:0] fetch_buffer [0:(FETCHW+8)];
 reg  [23:0] scale_buffer [0:639];
 reg  [15:0] sb0;
 reg signed [11:0] fetch_x = 0;
@@ -223,12 +192,8 @@ reg  fetching = 0;
 
 reg display_enable = 1;
 
-reg [10:0] glitchx2_reg = 'h1fd;
-reg [8:0]  ram_burst_col = 'h1fe; //'b111111010;
-
-reg [15:0] fetch_w = FETCHW;
-reg [15:0] fetch_preroll = 1;//'h3ff;
-//parameter fetch_preroll = 64;
+reg [11:0] fetch_w = FETCHW;
+reg [15:0] fetch_preroll = 0;
 
 reg [15:0] row_pitch = 1024;
 
@@ -253,6 +218,7 @@ reg [4:0] ram_fetch_delay2_max = 0;
 SDRAM_Controller_v sdram(
   .clk(z_sample_clk),
   .reset(sdram_reset),
+  .idle(sdram_idle),
   
   // command and write port
   .cmd_ready(cmd_ready),
@@ -262,9 +228,7 @@ SDRAM_Controller_v sdram(
   .cmd_address(ram_addr),
   .cmd_data_in(ram_data_in),
   .cmd_data_in_next(ram_data_in_next),
-  .burst_col(ram_burst_col),
-  .burst(ram_burst),
-  .write_burst(ram_write_burst),
+  .burst_size(ram_burst_size),
   
   // read data port
   .data_out(ram_data_out),
@@ -301,9 +265,17 @@ reg [3:0] tmds_out_pbuf;
 reg [3:0] tmds_out_nbuf;
 assign TMDS_out_P = tmds_out_pbuf;
 assign TMDS_out_N = tmds_out_nbuf;
-reg dvid_reset = 0;
-reg [1:0] dvid_reset_sync = 0;
+reg dvid_reset = 1;
+reg [1:0] dvid_reset_sync = 1;
 reg dvi_vsync_reg;
+
+`ifdef SIMULATION
+  assign vga_r = red_p;
+  assign vga_g = green_p;
+  assign vga_b = blue_p;
+  assign vga_hs = dvi_hsync;
+  assign vga_vs = dvi_vsync;
+`endif
 
 `ifndef SIMULATION
 dvid_out dvid_out(
@@ -323,13 +295,13 @@ dvid_out dvid_out(
 );
 `endif
 
-// vga registers
+// vga registers -------------------------------------------------------------
 reg [11:0] counter_x = 0;
 reg [11:0] counter_y = 0;
 reg [11:0] display_x2 = 0;
 reg [11:0] display_x3 = 0;
 
-// modeline
+// modeline -------------------------------------------------------------
 reg [11:0] h_rez        = 1280;
 reg [11:0] h_sync_start = 1280+72;
 reg [11:0] h_sync_end   = 1280+80;
@@ -342,7 +314,7 @@ reg [11:0] screen_w = 1280;
 reg [11:0] screen_h = 720;
 reg [11:0] screen_w_sync = 1280;
 
-// zorro port buffers / flags
+// zorro port buffers / flags -------------------------------------------------------------
 reg ZORRO3 = 1; 
 reg [23:0] zaddr; // zorro 2 address
 reg [23:0] zaddr_sync;
@@ -401,7 +373,7 @@ assign zA  = (zDOE & dataout_z3_latched) ? {data_z3_low16_latched, 7'bzzzz_zzz} 
 // autoconf status
 reg z3_confdone = 0;
 
-// zorro synchronizers
+// zorro synchronizers -------------------------------------------------------------
 // (inspired by https://github.com/endofexclusive/greta/blob/master/hdl/bus_interface/bus_interface.vhdl)
 
 reg [3:0] znAS_sync  = 3'b111;
@@ -433,7 +405,7 @@ reg [23:0] last_read_addr = 0;
 reg [15:0] last_data = 0;
 reg [15:0] last_read_data = 0;
 
-// 8 bit palette regs
+// 8 bit palette regs -------------------------------------------------------------
 reg [7:0] palette_r [0:255];
 reg [7:0] palette_g [0:255];
 reg [7:0] palette_b [0:255];
@@ -444,20 +416,6 @@ reg [7:0] pal1r;
 reg [7:0] pal1g;
 reg [7:0] pal1b;
 
-// sprites, currently disabled
-/*reg [15:0] sprite_a1 [0:127];
-reg [15:0] sprite_a2 [0:127];
-reg [10:0] sprite_ax = 0;
-reg [10:0] sprite_ay = 0;
-reg [10:0] sprite_ax2 = 15;
-reg [10:0] sprite_ay2 = 15;
-reg [7:0] sprite_ptr  = 0;
-reg [4:0] sprite_bit = 15;
-reg [1:0] sprite_pidx = 0;
-reg [7:0] sprite_palette_r [0:3];
-reg [7:0] sprite_palette_g [0:3];
-reg [7:0] sprite_palette_b [0:3];*/
-
 // 0 == 8 bit
 // 1 == 16 bit
 // 2 == 32 bit
@@ -466,7 +424,7 @@ reg [2:0] blitter_colormode = 1;
 reg [1:0] scalemode_h = 0;
 reg [1:0] scalemode_v = 0;
 
-reg [15:0] REVISION = 85; // 1.8.5
+reg [15:0] REVISION = 90; // 1.9.0
 
 // memory map
 parameter reg_size = 32'h01000;
@@ -489,9 +447,9 @@ reg [7:0] dataout_time = 'h02;
 reg [7:0] datain_time = 'h10;
 reg [7:0] datain_counter = 0;
 
-reg [4:0] margin_x = 10;
-reg [10:0] safe_x1 = 0;
-reg [10:0] safe_x2 = 'h220; //'h60;
+reg [4:0] margin_x = 0;
+reg [10:0] safe_x1 = 'h200;
+reg [10:0] safe_x2 = 'h1e0; //'h220; //'h60;
 
 // blitter registers
 reg [15:0] blitter_x1 = 0; // 20
@@ -503,10 +461,10 @@ reg [15:0] blitter_y3 = 0; // 2e
 reg [15:0] blitter_x4 = 0; // 30
 reg [15:0] blitter_y4 = 0; // 32
 
-parameter BLITTER_COPY_SIZE = 32;
+parameter BLITTER_COPY_SIZE = 16;
 
 reg [15:0] blitter_rgb = 'h0008; // 28
-reg [15:0] blitter_copy_rgb [0:BLITTER_COPY_SIZE-1];
+reg [15:0] blitter_copy_rgb [0:BLITTER_COPY_SIZE-1]; // CHECKME pad?
 reg [15:0] blitter_rgb32 [0:1];
 reg blitter_rgb32_t = 0;
 reg [2:0]  blitter_enable = 0; // 2a
@@ -514,15 +472,34 @@ reg [23:0] blitter_base = 0;
 reg [23:0] blitter_base2 = 0;
 reg [23:0] blitter_ptr = 0;
 reg [23:0] blitter_ptr2 = 0;
+reg blitter_copy_write_done = 0;
+
+`ifdef SIMULATION
+wire [15:0] copbuf_000 = blitter_copy_rgb[0];
+wire [15:0] copbuf_001 = blitter_copy_rgb[1];
+wire [15:0] copbuf_002 = blitter_copy_rgb[2];
+wire [15:0] copbuf_003 = blitter_copy_rgb[3];
+wire [15:0] copbuf_004 = blitter_copy_rgb[4];
+wire [15:0] copbuf_005 = blitter_copy_rgb[5];
+wire [15:0] copbuf_006 = blitter_copy_rgb[6];
+wire [15:0] copbuf_007 = blitter_copy_rgb[7];
+wire [15:0] copbuf_008 = blitter_copy_rgb[8];
+wire [15:0] copbuf_009 = blitter_copy_rgb[9];
+wire [15:0] copbuf_00a = blitter_copy_rgb[10];
+wire [15:0] copbuf_00b = blitter_copy_rgb[11];
+wire [15:0] copbuf_00c = blitter_copy_rgb[12];
+wire [15:0] copbuf_00d = blitter_copy_rgb[13];
+wire [15:0] copbuf_00e = blitter_copy_rgb[14];
+wire [15:0] copbuf_00f = blitter_copy_rgb[15];
+`endif
 
 reg [15:0] blitter_curx = 0;
 reg [15:0] blitter_cury = 0;
 reg [15:0] blitter_curx2 = 0;
 reg [15:0] blitter_cury2 = 0;
 reg [7:0]  blitter_copy_counter = 0;
-reg [7:0] blitter_copy_stopx = 0;
-reg [15:0] blitter_copy_startx = 0;
-reg [15:0] blitter_copy_startx2 = 0;
+reg [5:0]  blitter_reads_issued = 0;
+reg blitter_reads_done = 0;
 
 // main FSM
 parameter RESET = 0;
@@ -618,6 +595,55 @@ reg z2_lds = 0;
 reg z3_din_latch = 0;
 reg z3_fcs_state = 0;
 
+// VIDEO CAPTURE -----------------------------------------------------
+
+reg dcm7_psen = 0;
+reg dcm7_psincdec = 0;
+reg dcm7_rst = 0;
+
+reg [7:0] dcm7_counter = 32;
+
+`ifndef SIMULATION
+clk_wiz_v3_6 DCM(
+  .CLK_IN1(CLK50),
+  
+  .CLK_OUT1(z_sample_clk),
+  .CLK_OUT2(sd_clk),
+  
+  .CLK_OUT4(clk40_unbuffered),
+                 
+`ifdef PIXCLK_100
+  .CLK_OUT5(clk75_unbuffered) // 100mhz
+`endif
+`ifndef PIXCLK_100                 
+  .CLK_OUT3(clk75_unbuffered)
+`endif
+);
+
+DCM_SP #(
+  .CLKIN_PERIOD(140.0),
+  .CLKOUT_PHASE_SHIFT("VARIABLE"),
+  .CLKFX_MULTIPLY(2),
+  .CLKDV_DIVIDE(2),
+  // -16, -4 perfect on A2000
+  // 16 perfect on A3000
+  .PHASE_SHIFT(0),
+  .CLKFX_DIVIDE(1))
+dcm7 (
+  .CLKIN(zE7M),
+  .RST(dcm7_rst),
+  .CLKFB(dcm7_0),
+  .CLK0(dcm7_0),
+  .CLK90(dcm7_90),
+  .CLK180(dcm7_180),
+  .CLK270(dcm7_270),
+  .PSCLK(z_sample_clk),
+  .PSEN(dcm7_psen),
+  .PSINCDEC(dcm7_psincdec),
+  .PSDONE(dcm7_psdone)
+);
+`endif
+
 // video capture regs
 reg videocap_mode = 0;
 reg [9:0] videocap_x = 0;
@@ -636,8 +662,7 @@ reg [9:0] videocap_xpoint = 'h27e; //'h3ff;
 reg [9:0] videocap_save_x = 0;
 reg [9:0] videocap_save_x2 = 0;
 reg [9:0] videocap_line_saved_y = 0;
-reg  [23:0] videocap_save_next_addr = 0;
-reg  [23:0] videocap_save_base = 0;
+reg  [23:0] videocap_save_base = 'h00f80000;
 reg videocap_line_saved = 0;
 
 reg [15:0] videocap_rgbin = 0;
@@ -645,7 +670,7 @@ reg [15:0] videocap_rgbin2 = 0;
 reg [9:0]  videocap_default_w = 640;
 reg [9:0]  videocap_default_h = 512; //480;
 reg [9:0]  videocap_voffset = 'h2a;
-reg [9:0] videocap_prex = 'h41;
+reg [9:0] videocap_prex = 'h42;
 reg [9:0] videocap_height = 'h200; //'h117; // 'h127;
 reg [8:0] videocap_width = 320; //318; // FIXME
 
@@ -663,7 +688,6 @@ reg videocap_interlace=0;
 reg videocap_ntsc=0;
 reg [9:0] videocap_voffset2=0;
 
-// VIDEO CAPTURE -----------------------------------------------------
 always @(posedge dcm7_0) begin
   videocap_hs <= {videocap_hs[8:0], videoHS};
   videocap_vs <= {videocap_vs[8:0], videoVS};
@@ -768,12 +792,12 @@ always @(posedge z_sample_clk) begin
   vga_screen_h_sync <= vga_screen_h;
   vga_scalemode_v_sync <= vga_scalemode_v;
   
-  if (videocap_mode) begin
+  /*if (videocap_mode) begin
     if (need_row_fetch_y>((vga_screen_h_sync>>vga_scalemode_v_sync) - videocap_interlace_sync))
       need_row_fetch_y_latched <= 1;
     else
       need_row_fetch_y_latched <= need_row_fetch_y+1'b1;
-  end else
+  end else*/
     need_row_fetch_y_latched <= need_row_fetch_y;
   
   zaddr <= {zA[22:0],1'b0};
@@ -882,12 +906,11 @@ reg [5:0] ram_arbiter_state = 0;
 
 parameter RAM_READY = 0;
 parameter RAM_READY2 = 1;
-parameter RAM_FETCHING_ROW8 = 2;
+parameter RAM_FETCHING_ROW = 2;
 parameter RAM_ROW_FETCHED = 3;
 parameter RAM_READING_ZORRO_PRE = 4;
 parameter RAM_WRITING_ZORRO = 5;
 parameter RAM_BURST_OFF = 6;
-parameter RAM_BURST_OFF2 = 7;
 parameter RAM_BURST_ON = 8;
 parameter RAM_BLIT_WRITE = 9;
 parameter RAM_REFRESH = 10;
@@ -903,9 +926,10 @@ parameter RAM_REFRESH_END = 19;
 parameter RAM_FETCH_DELAY_PRE = 20;
 parameter RAM_BLIT_COPY_READ2 = 21;
 
+// FIXME move regs up
 reg [11:0] need_row_fetch_y = 0;
 reg [11:0] need_row_fetch_y_latched = 0;
-reg [11:0] fetch_line_y = 0;
+reg [11:0] fetch_line_y = 1;
 reg [2:0] linescalecount = 0;
 
 reg blitter_dirx = 0;
@@ -1001,33 +1025,54 @@ always @(posedge z_sample_clk) begin
       
       row_pitch    <= 1024;
       
-      safe_x1 <= 0;
-      safe_x2 <= 'h220;
-      fetch_preroll <= 1;
-      ram_fetch_delay2_max <= 0;
+      //safe_x1 <= 'h1ff;
+      safe_x2 <= 'h1e0;
+      fetch_preroll <= 'h1e0;
+      ram_fetch_delay2_max <= 'h0;
       
-      videocap_mode <= 0;
+      videocap_mode <= 1;
+      blitter_enable <= 0;
+      pan_ptr <= 'hf80000; // capture vertical offset
+      colormode <= 1;
+      blitter_colormode <= 1;
+      blitter_row_pitch <= 640;
       dvid_reset <= 1;
-      aligned_row_mode <= 0;
       
       scalemode_h <= 0;
       scalemode_v <= 0;
-      colormode <= 1;
-      blitter_colormode <= 1;
+      margin_x <= 0;
+
+      `ifdef SIMULATION
+      videocap_mode <= 0;
+      blitter_enable <= 2;
+      pan_ptr <= 'h000000;
+      blitter_base <= 0;
+      //blitter_base <= 'hf80000; // capture vertical offset
       
-      blitter_base <= 'hf80000; // capture vertical offset
-      pan_ptr <= 'hf80000; // capture vertical offset
-      margin_x <= 10;
-      fetch_preroll <= 1;
+      blitter_x4 <= 0;
+      blitter_y3 <= 128;
+      blitter_x3 <= 64;
+      blitter_y4 <= 128+100;
       
-      blitter_x1 <= 0;
-      blitter_y1 <= 0; 
-      blitter_x2 <= 4094; // FIXME crashes with 4095
-      blitter_y2 <= 4095;
-      blitter_ptr <= 0;
-      blitter_rgb <= 0;
-      blitter_row_pitch <= 4094;
-      blitter_enable <= 0;
+      blitter_x2 <= 5;
+      blitter_y1 <= 128;
+      blitter_x1 <= 5+64;
+      blitter_y2 <= 128+100;
+      
+      blitter_curx <= 5+64;
+      blitter_cury <= 128;
+      blitter_curx2 <= 64;
+      blitter_cury2 <= 128;
+      blitter_ptr <= 128*640;
+      blitter_ptr2 <= 128*640;
+      blitter_dirx <= 1;
+      blitter_diry <= 0;
+      
+      blitter_rgb <= 'hffff;
+      blitter_rgb32[0] <= 'hffff;
+      blitter_rgb32[1] <= 'h0000;
+      blitter_rgb32_t <= 1;
+      `endif
       
       ram_low   <= 'h600000;
       ram_high  <= 'h600000 + ram_size-4;
@@ -1054,15 +1099,20 @@ always @(posedge z_sample_clk) begin
     
     DECIDE_Z2_Z3: begin
       // poor man's z3sense
-      /*if (zaddr_autoconfig) begin
+      `ifdef ZORRO2
+      if (zaddr_autoconfig) begin
         sd_reset <= 0;
         ZORRO3 <= 0;
         zorro_state <= Z2_CONFIGURING;
-      end else*/ if (z3addr_autoconfig) begin
+      end
+      `endif
+      `ifdef ZORRO3
+      if (z3addr_autoconfig) begin
         sd_reset <= 0;
         ZORRO3 <= 1;
         zorro_state <= Z3_CONFIGURING;
       end
+      `endif
     end
     
     Z3_CONFIGURING: begin
@@ -1077,7 +1127,7 @@ always @(posedge z_sample_clk) begin
           zorro_state <= Z3_DTACK;
           
           case (z3addr[15:0])
-            'h0000: data_z3_hi16 <= 'b1001_1111_1111_1111; // zorro 3 (10), no pool link (0), autoboot ROM (1)
+            'h0000: data_z3_hi16 <= 'b1000_1111_1111_1111; // zorro 3 (10), no pool link (0), autoboot ROM (1)
             'h0100: data_z3_hi16 <= 'b0001_1111_1111_1111; // next board unrelated (0), 32mb
             
             'h0004: data_z3_hi16 <= 'b1111_1111_1111_1111; // product number
@@ -1169,7 +1219,7 @@ always @(posedge z_sample_clk) begin
           
           case (zaddr_sync2[7:0])
             8'h00: data <= 'b1101_1111_1111_1111; // zorro 2 (11), no pool (0) rom (1)
-            8'h02: data <= 'b0111_1111_1111_1111; // next board unrelated (0), 4mb
+            8'h02: data <= 'b0111_1111_1111_1111; // next board unrelated (0), 4mb (110 for 2mb)
             
             8'h04: data <= 'b1111_1111_1111_1111; // product number
             8'h06: data <= 'b1110_1111_1111_1111; // (1)
@@ -1252,16 +1302,18 @@ always @(posedge z_sample_clk) begin
       z_confout <= 1;
       
       sdram_reset <= 0;
-      blitter_enable <= 1; // clear mem
-      
+      //blitter_enable <= 1; // clear mem
+
       zorro_state <= CONFIGURED_CLEAR;
     end
     
     CONFIGURED_CLEAR: begin
-      if (ZORRO3) begin
-        zorro_state <= Z3_IDLE;
-      end else begin
-        zorro_state <= Z2_IDLE;
+      if (sdram_idle) begin
+        if (ZORRO3) begin
+          zorro_state <= Z3_IDLE;
+        end else begin
+          zorro_state <= Z2_IDLE;
+        end
       end
     end
   
@@ -1665,7 +1717,7 @@ always @(posedge z_sample_clk) begin
         
         // Autoboot ROM
         // See http://amigadev.elowar.com/read/ADCD_2.1/Libraries_Manual_guide/node041C.html
-        'h80: rr_data <= 'h9000_00d8; // WORDWIDE+CONFIGTIME  DAsize
+        /*'h80: rr_data <= 'h9000_00d8; // WORDWIDE+CONFIGTIME  DAsize
         'h84: rr_data <= 'h0036_00b8; // DiagPt: 0xb6         BootPt
         'h88: rr_data <= 'h0028_0000; // DevName pointer      Res
         'h8c: rr_data <= 'h0000_4afc; // Res, ROMTAG
@@ -1721,7 +1773,7 @@ always @(posedge z_sample_clk) begin
         'h148: rr_data <= 'h4e75_646f; // rts, "dos.library\0"
         'h14c: rr_data <= 'h732e_6c69;
         'h150: rr_data <= 'h6272_6172;
-        'h154: rr_data <= 'h7900_0000;
+        'h154: rr_data <= 'h7900_0000;*/
         
         default: begin
           rr_data[31:16] <= REVISION;
@@ -1776,9 +1828,9 @@ always @(posedge z_sample_clk) begin
         'h0c: margin_x <= regdata_in[9:0];
         'h0e: colormode <= regdata_in[2:0];
         
-        'h10: safe_x1 <= regdata_in[10:0];
+        //'h10: safe_x1 <= regdata_in[10:0];
         //'h12: ram_fetch_delay_max <= regdata_in[4:0];
-        'h18: ram_fetch_delay2_max <= regdata_in[4:0]; // below 0x14 causes missing pixel writes
+        //'h18: ram_fetch_delay2_max <= regdata_in[4:0]; // below 0x14 causes missing pixel writes
         
         //'h12: refresh_warm_max <= regdata_in[7:0];
         'h16: refresh_cool_max <= regdata_in[4:0]; // below 0xa causes refresh flicker in 8bit
@@ -1796,7 +1848,7 @@ always @(posedge z_sample_clk) begin
         'h26: blitter_y2 <= regdata_in[15:0];
         'h28: blitter_rgb <= regdata_in[15:0];
         'h2a: begin
-          blitter_enable <= regdata_in[3:0];
+          blitter_enable     <= regdata_in[1:0];
           
           blitter_curx <= blitter_x1;
           blitter_cury <= blitter_y1;
@@ -1808,10 +1860,7 @@ always @(posedge z_sample_clk) begin
           
           blitter_ptr  <= blitter_base;
           blitter_ptr2 <= blitter_base2;
-          blitter_rgb32_t <= 0;
-          
-          blitter_copy_startx  <= blitter_x1;
-          blitter_copy_startx2 <= blitter_x3;
+          blitter_rgb32_t <= 1;          
         end
         'h2c: blitter_x3 <= regdata_in[11:0];
         'h2e: blitter_y3 <= regdata_in[11:0];
@@ -1839,7 +1888,6 @@ always @(posedge z_sample_clk) begin
         
         'h4e: begin
           videocap_mode <= regdata_in[0];
-          aligned_row_mode <= regdata_in[0];
         end
         'h50: videocap_width <= regdata_in[9:0];
         'h52: videocap_height <= regdata_in[9:0];
@@ -1888,12 +1936,12 @@ always @(posedge z_sample_clk) begin
   x_safe_area_sync <= x_safe_area;
 
   if (videocap_mode) begin
-    if (videocap_y3<videocap_height 
-        && videocap_line_saved_y!=videocap_y3 
+    if (videocap_y3<videocap_height
+        && videocap_line_saved_y!=videocap_y3
         && videocap_line_saved==1) begin
       videocap_line_saved <= 0;
       videocap_line_saved_y <= videocap_y3;
-      videocap_save_base <= 'h00f80000 + ((videocap_y2-videocap_voffset2)<<10);
+      videocap_save_base <= 'h00f80000 + ((videocap_y2-videocap_voffset2)*640);
       videocap_save_x <= 0;
       videocap_save_x2 <= 0;
     end
@@ -1903,22 +1951,25 @@ always @(posedge z_sample_clk) begin
     RAM_READY: begin
       ram_enable <= 0;
       ram_arbiter_state <= RAM_READY2;
-      fetch_y <= pan_ptr_sync + (fetch_line_y*fetch_w); // 1024
+      fetch_y <= pan_ptr_sync + (fetch_line_y*FETCHW);
+      fetch_w <= FETCHW;
     end
     
     RAM_READY2: begin
       if (row_fetched) begin
-        ram_enable <= 0;
-        ram_burst <= 0;
+        //ram_enable <= 0;
         // 2-word burst for faster videocap
-        ram_write_burst <= videocap_mode && (blitter_enable==0);
+        ram_burst_size <= (videocap_mode);
+          
         if (data_out_queue_empty)
           ram_arbiter_state <= RAM_BURST_OFF;
       end else begin
         // start fetching a row
-        ram_enable <= 0;
-        ram_burst <= 1;
-        ram_arbiter_state <= RAM_BURST_ON;
+        //ram_enable <= 0;
+        ram_addr  <= fetch_y;
+        ram_burst_size <= 3'b111;
+        if (data_out_queue_empty)
+          ram_arbiter_state <= RAM_BURST_ON;
         
         fetch_x <= -margin_x;
       end
@@ -1926,60 +1977,41 @@ always @(posedge z_sample_clk) begin
     
     RAM_BURST_ON: begin
       if (cmd_ready) begin
-        ram_arbiter_state <= RAM_FETCHING_ROW8;
+        ram_arbiter_state <= RAM_FETCHING_ROW;
         
-        ram_addr  <= fetch_y+glitchx2_reg;
+        ram_addr  <= fetch_y;
         ram_write <= 0;
         ram_byte_enable <= 'b11;
         ram_enable <= 1;
       end
     end
     
-    RAM_FETCHING_ROW8: begin
-      if ((fetch_x == fetch_w)
-          || (aligned_row_mode==1 && fetch_x == screen_w_sync)) begin
-        row_fetched <= 1; // row completely fetched
-        ram_enable <= 0;
-        ram_arbiter_state <= RAM_READY;
-      end
-      
+    RAM_FETCHING_ROW: begin      
       if (data_out_ready) begin
         ram_addr  <= ram_addr + 1'b1; // burst incremented
         fetch_x <= fetch_x + 1'b1;
         fetch_buffer[fetch_x] <= ram_data_out;
+
+        if (fetch_x > fetch_w-1) begin
+          ram_enable <= 0;
+        end
+        
+        if (fetch_x > fetch_w) begin
+          row_fetched <= 1; // row completely fetched
+          //ram_burst_size <= 0;
+          ram_arbiter_state <= RAM_READY;
+        end
       end
     end
     
     RAM_BURST_OFF: begin
-      // this solves the problem of first write/read lost
-      // after burst disable
-      if (cmd_ready) begin
-        ram_enable <= 1;
-        ram_write <= 0;
-        ram_byte_enable <= 1'b11;
-        ram_addr <= refresh_addr;
-        refresh_addr <= refresh_addr + 512;
-        
-        ram_arbiter_state <= RAM_BURST_OFF2;
-      end
-    end
-    
-    RAM_BURST_OFF2: begin
       ram_enable <= 0;
       if (ram_fetch_delay2_counter<ram_fetch_delay2_max)
         ram_fetch_delay2_counter <= ram_fetch_delay2_counter + 1;
       else
         ram_arbiter_state <= RAM_ROW_FETCHED;
     end
-    
-    RAM_FETCH_DELAY_PRE: begin
-      ram_enable <= 0;
-      if (ram_fetch_delay_counter<ram_fetch_delay_max)
-        ram_fetch_delay_counter <= ram_fetch_delay_counter + 1;
-      else
-        ram_arbiter_state <= RAM_READY;
-    end
-    
+        
     RAM_ROW_FETCHED: begin
       if ((need_row_fetch_y_latched!=fetch_line_y) && x_safe_area_sync && cmd_ready) begin
         row_fetched <= 0;
@@ -1987,59 +2019,71 @@ always @(posedge z_sample_clk) begin
         fetch_x <= -margin_x;
         ram_fetch_delay_counter <= 0;
         ram_fetch_delay2_counter <= 0;
-        ram_arbiter_state <= RAM_FETCH_DELAY_PRE;
+        ram_arbiter_state <= RAM_READY;
+        ram_write   <= 0;
       
-      end else if (x_safe_area_sync) begin
+      //end else if (x_safe_area_sync) begin
         // do nothing if in safe area
+        
+      // ZORRO READ/WRITE ----------------------------------------------
+      //end else if (videocap_mode && zorro_ram_write_request) begin
+      //  zorro_ram_write_request <= 0;
+      end else if (zorro_ram_write_request && cmd_ready) begin
+        // process write request
+        ram_enable <= 0; // CHECKME
+        ram_burst_size <= 0;
+        ram_arbiter_state <= RAM_WRITING_ZORRO_PRE;
+      end else if (zorro_ram_read_request && cmd_ready) begin
+        // process read request
+        zorro_ram_read_done <= 0;
+        ram_enable <= 0;
+        ram_burst_size <= 0;
+        ram_arbiter_state <= RAM_READING_ZORRO_PRE;
         
       // BLITTER ----------------------------------------------------------------
       end else if (blitter_enable==1 && cmd_ready) begin
-        if (blitter_colormode==2) begin
-          blitter_rgb <= blitter_rgb32[blitter_rgb32_t];
-        end
-        
         // rect fill blitter
+        
         if (blitter_curx <= blitter_x2) begin
-          ram_arbiter_state <= RAM_BLIT_WRITE;
+          blitter_curx <= blitter_curx + 1'b1;
+          ram_byte_enable <= 'b11;
+          ram_addr    <= blitter_ptr + blitter_curx;
+          ram_data_in <= blitter_rgb;
+          ram_write   <= 1;
+          ram_enable  <= 1;
+          blitter_rgb32_t <= ~blitter_rgb32_t;
+          if (blitter_colormode==2) begin
+            blitter_rgb <= blitter_rgb32[blitter_rgb32_t];
+          end
         end else if (blitter_cury<blitter_y2) begin
           blitter_cury <= blitter_cury + 1'b1;
           blitter_curx <= blitter_x1;
           blitter_ptr <= blitter_ptr + blitter_row_pitch;
-          blitter_rgb32_t <= 0;
+          blitter_rgb32_t <= 1;
+          if (blitter_colormode==2) begin
+            blitter_rgb <= blitter_rgb32[0];
+          end
+          ram_enable  <= 0;
         end else begin
-          blitter_curx <= 0;
-          blitter_cury <= 0;
           blitter_enable <= 0;
-          //ram_enable <= 0; // CHECKME this was commented out: creates regular missing dots when not commented out
-          // NOPE, this doesn't make a difference actually.
+          ram_write   <= 0;
+          ram_enable  <= 0;
         end
       
       end else if (blitter_enable==2 && cmd_ready) begin
         // block copy read
         //blitter_copy_counter <= 0;
         ram_enable <= 0;
-        
-        if (data_out_queue_empty) begin
+        if (data_out_queue_empty && sdram_idle) begin
           ram_arbiter_state <= RAM_BLIT_COPY_READ1;
         end
         
       end else if (blitter_enable==4 && cmd_ready) begin
         ram_enable <= 0;
+        blitter_copy_write_done <= 0;
         ram_arbiter_state <= RAM_BLIT_COPY_WRITE;
         
-      // ZORRO READ/WRITE ----------------------------------------------
-      end else if (videocap_mode && zorro_ram_write_request) begin
-        zorro_ram_write_request <= 0;
-      end else if (blitter_enable==0 && zorro_ram_write_request && cmd_ready) begin
-        // process write request
-        //ram_enable <= 0; // CHECKME
-        ram_arbiter_state <= RAM_WRITING_ZORRO_PRE;
-      end else if (blitter_enable==0 && zorro_ram_read_request && cmd_ready) begin
-        // process read request
-        zorro_ram_read_done <= 0;
-        ram_enable <= 0;
-        ram_arbiter_state <= RAM_READING_ZORRO_PRE;
-      end else if (!videocap_line_saved && videocap_mode && cmd_ready) begin
+      end else if (!videocap_line_saved && videocap_mode && cmd_ready && blitter_enable==0) begin
         // CAPTURE
         ram_enable <= 1;
         ram_write <= 1;
@@ -2053,6 +2097,7 @@ always @(posedge z_sample_clk) begin
           videocap_save_x2 <= videocap_save_x2  + 2'b10;
         end else begin
           videocap_line_saved <= 1;
+          ram_enable <= 0;
         end
       end else if (refresh_max > 0 && cmd_ready) begin
         if (refresh_counter < refresh_max) begin
@@ -2091,97 +2136,81 @@ always @(posedge z_sample_clk) begin
         refresh_cool_counter <= refresh_cool_counter+1'b1;
     end
     
-    RAM_BLIT_WRITE: begin
-      if (cmd_ready) begin
-        blitter_curx <= blitter_curx + 1'b1;
-        ram_byte_enable <= 'b11;
-        ram_addr    <= blitter_ptr + blitter_curx;
-        ram_data_in <= blitter_rgb;
-        ram_write   <= 1;
-        ram_enable  <= 1;
-        
-        blitter_rgb32_t <= ~blitter_rgb32_t;
-        
-        ram_arbiter_state <= RAM_WRITE_END1;
-      end
-    end
-    
     RAM_WRITE_END1: begin
-      if (!cmd_ready) begin
+      blitter_copy_counter <= 0;
+      if (cmd_ready) begin
         ram_arbiter_state <= RAM_WRITE_END;
-      end else begin
-        ram_enable <= 1;
       end
     end
     
     RAM_WRITE_END: begin
-      if (cmd_ready) begin
-        ram_enable <= 0;
+      // fence
+      ram_enable  <= 0;
+      if (cmd_ready && data_out_queue_empty)
         ram_arbiter_state <= RAM_ROW_FETCHED;
-      end
     end
     
-    RAM_BLIT_COPY_READ1: begin
-      if (cmd_ready) begin
-        ram_byte_enable <= 'b11;
-        ram_addr    <= blitter_ptr2+blitter_curx2;
-        ram_write   <= 0;
-        ram_enable  <= 1;
-        ram_arbiter_state <= RAM_BLIT_COPY_READ;
-      end
-    end
-    
-    RAM_BLIT_COPY_READ: begin
-      ram_enable <= 0; // FIXME initial back-to-back read of sdram controller sends data_out_ready too early? row timing?
-      
-      if (data_out_ready) begin
-        if (blitter_copy_counter<BLITTER_COPY_SIZE)
-          blitter_copy_rgb[blitter_copy_counter] <= ram_data_out;
-        
-        if (blitter_curx2 != blitter_x4 && blitter_copy_counter<BLITTER_COPY_SIZE) begin
-          // still inside the same row and copy buffer still not full
-          blitter_copy_counter <= blitter_copy_counter + 1;
-          
-          if (x_safe_area_sync) begin
-            ram_enable <= 0;
-            ram_arbiter_state <= RAM_ROW_FETCHED;
-          end else
-            // hot loop while we can
-            ram_arbiter_state <= RAM_BLIT_COPY_READ1;
-        
-          if (blitter_dirx==1) begin
-            // previous column
-            blitter_curx2 <= blitter_curx2 - 1'b1;
-          end else begin
-            // next column
-            blitter_curx2 <= blitter_curx2 + 1'b1;
-          end
-        end else begin
-          blitter_enable <= 4;
-          ram_arbiter_state <= RAM_ROW_FETCHED;
-          ram_enable <= 0;
-          // row done or buffer full, start writing
-          blitter_copy_counter <= 0;
-        end
-      end
-    end
-    
-    RAM_BLIT_COPY_WRITE: begin
-      ram_addr    <= blitter_ptr+blitter_curx;
-      ram_data_in <= blitter_copy_rgb[blitter_copy_counter];
-      ram_write   <= 1;
-      ram_enable  <= 1;
+    RAM_BLIT_COPY_READ1: begin // 15
+      ram_enable <= 0;
       ram_byte_enable <= 'b11;
+      ram_write   <= 0;
+      // fence
+      if (cmd_ready && data_out_queue_empty)
+        ram_arbiter_state <= RAM_BLIT_COPY_READ;
+
+      blitter_reads_issued <= 0;
+      blitter_reads_done <= 0;
+    end
     
-      if (blitter_curx != blitter_x2) begin
-        if (blitter_copy_counter == BLITTER_COPY_SIZE) begin
-          // buffer empty, back to read
-          blitter_copy_counter <= 0;
-          blitter_enable <= 2;
-          ram_arbiter_state <= RAM_WRITE_END1;
-        end else begin
-          blitter_copy_counter <= blitter_copy_counter + 1;
+    RAM_BLIT_COPY_READ: begin // 14
+      if (data_out_ready) begin
+        // FIXME prevent wrap  
+        blitter_copy_counter <= blitter_copy_counter + 1;
+        blitter_copy_rgb[blitter_copy_counter] <= ram_data_out;
+      end
+
+      if (blitter_reads_issued>0 && blitter_copy_counter >= blitter_reads_issued) begin
+        // did read all we need/can
+        blitter_enable <= 4;
+        // if we don't switch off cleanly here, we get some weird data bus contention
+        // on the real device, but not in simulation
+        ram_arbiter_state <= RAM_WRITE_END1;
+        blitter_copy_counter <= 0;
+      end
+
+      if (cmd_ready) begin
+        if (!blitter_reads_done && blitter_reads_issued<BLITTER_COPY_SIZE) begin
+          blitter_reads_issued <= blitter_reads_issued + 1;
+          ram_addr   <= blitter_ptr2+blitter_curx2;
+          ram_enable <= 1;
+          
+          if (blitter_curx2 != blitter_x4)
+            if (blitter_dirx==1) begin
+              // previous column
+              blitter_curx2 <= blitter_curx2 - 1'b1;
+            end else begin
+              // next column
+              blitter_curx2 <= blitter_curx2 + 1'b1;
+            end
+          else
+            blitter_reads_done <= 1;
+        end else
+          ram_enable <= 0;
+      end
+    end
+    
+    RAM_BLIT_COPY_WRITE: begin // 16
+      if (cmd_ready) begin
+        ram_enable  <= 1;
         
+        if (blitter_copy_counter<BLITTER_COPY_SIZE) begin
+          ram_addr    <= blitter_ptr+blitter_curx;
+          ram_data_in <= blitter_copy_rgb[blitter_copy_counter];
+          ram_write   <= 1;
+          ram_byte_enable <= 'b11;
+        end
+        
+        if (!blitter_copy_write_done && blitter_curx != blitter_x2 && blitter_copy_counter<BLITTER_COPY_SIZE) begin
           if (blitter_dirx==1) begin
             // previous column
             blitter_curx <= blitter_curx - 1'b1;
@@ -2189,36 +2218,41 @@ always @(posedge z_sample_clk) begin
             // next column
             blitter_curx <= blitter_curx + 1'b1;
           end
-      
+          blitter_copy_counter <= blitter_copy_counter + 1;
+        end else
+          blitter_copy_write_done <= 1;
+        
+        if (blitter_copy_counter >= BLITTER_COPY_SIZE) begin
+          // buffer empty, back to read
+          blitter_enable <= 2;
           ram_arbiter_state <= RAM_WRITE_END1;
         end
-      end else if (blitter_cury2 == blitter_y4) begin
-        // done
-        blitter_copy_counter <= 0;
-        blitter_enable <= 0;
-        ram_arbiter_state <= RAM_WRITE_END1;
-      end else if (blitter_diry == 0) begin
-        // next row
-        blitter_curx <= blitter_x1;
-        blitter_curx2 <= blitter_x3;
-        blitter_ptr <= blitter_ptr + blitter_row_pitch;
-        blitter_ptr2 <= blitter_ptr2 + blitter_row_pitch;
-        blitter_cury <= blitter_cury + 1'b1;
-        blitter_cury2 <= blitter_cury2 + 1'b1;
-        blitter_copy_counter <= 0;
-        blitter_enable <= 2;
-        ram_arbiter_state <= RAM_WRITE_END1;
-      end else begin
-        // previous row
-        blitter_curx <= blitter_x1;
-        blitter_curx2 <= blitter_x3;
-        blitter_ptr <= blitter_ptr - blitter_row_pitch;
-        blitter_ptr2 <= blitter_ptr2 - blitter_row_pitch;
-        blitter_cury <= blitter_cury - 1'b1;
-        blitter_cury2 <= blitter_cury2 - 1'b1;
-        blitter_copy_counter <= 0;
-        blitter_enable <= 2;
-        ram_arbiter_state <= RAM_WRITE_END1;
+
+        if (blitter_copy_write_done && blitter_cury2 == blitter_y4) begin
+          // done
+          blitter_enable <= 0;
+          ram_arbiter_state <= RAM_WRITE_END1;
+        end else if (blitter_copy_write_done && blitter_diry == 0) begin
+          // next row
+          blitter_curx <= blitter_x1;
+          blitter_curx2 <= blitter_x3;
+          blitter_ptr <= blitter_ptr + blitter_row_pitch;
+          blitter_ptr2 <= blitter_ptr2 + blitter_row_pitch;
+          blitter_cury <= blitter_cury + 1'b1;
+          blitter_cury2 <= blitter_cury2 + 1'b1;
+          blitter_enable <= 2;
+          ram_arbiter_state <= RAM_WRITE_END1;
+        end else if (blitter_copy_write_done) begin
+          // previous row
+          blitter_curx <= blitter_x1;
+          blitter_curx2 <= blitter_x3;
+          blitter_ptr <= blitter_ptr - blitter_row_pitch;
+          blitter_ptr2 <= blitter_ptr2 - blitter_row_pitch;
+          blitter_cury <= blitter_cury - 1'b1;
+          blitter_cury2 <= blitter_cury2 - 1'b1;
+          blitter_enable <= 2;
+          ram_arbiter_state <= RAM_WRITE_END1;
+        end
       end
     end
     
@@ -2229,12 +2263,13 @@ always @(posedge z_sample_clk) begin
         ram_byte_enable <= 'b11;
         ram_enable <= 1;
         ram_arbiter_state <= RAM_READING_ZORRO;
-      end
+      end else
+        ram_enable <= 0;
     end
     
     RAM_READING_ZORRO: begin
+      ram_enable <= 0;
       if (data_out_ready) begin
-        ram_enable <= 0;
         zorro_ram_read_data <= ram_data_out;
         zorro_ram_read_done <= 1;
         zorro_ram_read_request <= 0;
@@ -2285,14 +2320,14 @@ reg[11:0] counter_8x = 0;
 
 reg display_sprite = 0;
 reg preheat = 0;
-reg x_safe_area = 0;
+reg x_safe_area = 1;
 reg x_safe_area_sync = 0;
 reg display_pixels = 0;
 
 reg vga_scalemode_h = 0;
 reg vga_scalemode_v = 0;
-reg[1:0] vga_colormode = 0;
-reg[4:0] vga_margin_x = 0;
+reg [2:0] vga_colormode = 0;
+reg [4:0] vga_margin_x = 0;
 
 reg[11:0] vga_h_max = 0;
 reg[11:0] vga_v_max = 0;
@@ -2304,7 +2339,7 @@ reg[11:0] vga_h_rez = 0;
 reg[11:0] vga_v_rez = 0;
 reg[11:0] vga_screen_h = 0;
 reg[11:0] vga_screen_w = 0;
-reg vga_reset = 0;
+reg vga_reset = 1;
 
 always @(posedge vga_clk) begin
   // clock domain sync
@@ -2333,27 +2368,24 @@ always @(posedge vga_clk) begin
   vga_reset <= dvid_reset;
 end
 
-reg [9:0] counter_scanout = 0;
-reg [9:0] counter_px = 0;
+reg [8:0] counter_scanout = 0; // CHECKME
 reg [3:0] counter_repeat = 0;
 reg [3:0] counter_repeat_delayed = 0;
 reg [1:0] counter_scanout_words = 1;
 reg [3:0] max_repeat = 0;
 reg counter_vscale = 0;
-reg aligned_row_mode = 0; // CHECKME
 reg black_border = 0;
 
 always @(posedge vga_clk) begin
-  x_safe_area <= ((counter_scanout > safe_x2) || (counter_scanout < safe_x1));
+  x_safe_area <= (counter_y > vga_screen_h || ((counter_scanout > safe_x2) && (counter_scanout < safe_x1)));
 
   if (vga_reset) begin
     counter_x <= 0;
-    counter_y <= 0;
+    counter_y <= vga_v_max;
     need_row_fetch_y <= 0;
     display_pixels <= 0;
     counter_scanout <= 0;
     counter_vscale <= 0;
-    counter_px <= 0;
     counter_repeat <= 0;
   end else if (counter_x > vga_h_max) begin
     counter_x <= 0;
@@ -2387,8 +2419,6 @@ always @(posedge vga_clk) begin
       max_repeat <= 3;
     else
       max_repeat <= 1;
-  else if (vga_colormode==3)
-    max_repeat <= 15;
   else
     if (vga_scalemode_h==1)
       max_repeat <= 1;
@@ -2400,14 +2430,11 @@ always @(posedge vga_clk) begin
   else
     counter_scanout_words <= 1;
 
-  if (/*!vga_reset && */
-      ((counter_y < vga_screen_h) || ((counter_x > vga_h_max) && counter_y>vga_v_max))) begin
+  if (!vga_reset &&
+      (counter_y < vga_screen_h)) begin
     if ((counter_x < vga_h_rez-1) || ((counter_x > vga_h_max) && counter_y!=vga_screen_h-1)) begin
-      display_pixels <= 1;
-    
       if (counter_repeat == max_repeat) begin
         counter_repeat <= 0;
-        counter_px <= (counter_px + counter_scanout_words);
         
         if (counter_vscale==0) begin
           counter_scanout <= (counter_scanout + counter_scanout_words);
@@ -2416,12 +2443,6 @@ always @(posedge vga_clk) begin
         end
       end else
         counter_repeat <= counter_repeat+1'b1;
-      
-    end else begin
-      counter_px <= 0;
-      if (aligned_row_mode)
-        counter_scanout <= 0;
-      display_pixels <= 0;
     end
     
     if ((counter_x == vga_h_rez) && (vga_scalemode_v==1)) begin
@@ -2429,12 +2450,12 @@ always @(posedge vga_clk) begin
     end
   end else begin
     need_row_fetch_y <= 0;
-    display_pixels <= 0;
     counter_scanout <= 0;
     counter_vscale <= 0;
-    counter_px <= 0;
     counter_repeat <= 0;
   end
+
+  display_pixels <= (counter_x < vga_h_rez && counter_y<vga_screen_h);
 
   counter_repeat_delayed <= counter_repeat;
   
@@ -2454,12 +2475,7 @@ always @(posedge vga_clk) begin
       rgb <= sb0;
   end
   
-  //if (counter_x>=vga_screen_w)
-  //  black_border <= 1;
-  //else
-  //  black_border <= 0;
-  
-  if (!display_pixels || black_border) begin
+  if (!display_pixels) begin
     red_p   <= 0;
     green_p <= 0;
     blue_p  <= 0;
@@ -2475,7 +2491,7 @@ always @(posedge vga_clk) begin
       blue_p  <= palette_b[rgb[15:8]];
     end
   end else if (vga_colormode==1) begin
-    // decode 16 to 24 bit color
+    // decode 16 to 24 bit color (r5g6b5)
     red_p   <= {rgb[4:0],  rgb[4:2]};
     green_p <= {rgb[10:5], rgb[10:9]};
     blue_p  <= {rgb[15:11],rgb[15:13]};
@@ -2486,11 +2502,23 @@ always @(posedge vga_clk) begin
     green_p <= rgb[7:0];
     red_p  <= rgb[15:8];
     
-  end else if (vga_colormode==3) begin
+  end else if (vga_colormode==4) begin
+    // decode 15 to 24 bit color (0r5g5b5)
+    red_p   <= {rgb[4:0],  rgb[4:2]};
+    green_p <= {rgb[9:5],  rgb[9:7]};
+    blue_p  <= {rgb[14:10],rgb[14:12]};
+  end else if (vga_colormode==5) begin
+    // decode 15 to 24 bit color (r5g5b50)
+    red_p   <= {rgb[5:1],  rgb[5:3]};
+    green_p <= {rgb[10:6], rgb[10:8]};
+    blue_p  <= {rgb[15:11],rgb[15:13]};
+    
+    
+  /*end else if (vga_colormode==3) begin
     // monochrome 1-bit
     blue_p  <= rgb[~counter_repeat_delayed]?pal1r:pal0r;
     green_p <= rgb[~counter_repeat_delayed]?pal1g:pal0g;
-    red_p   <= rgb[~counter_repeat_delayed]?pal1b:pal0b;
+    red_p   <= rgb[~counter_repeat_delayed]?pal1b:pal0b;*/
   end else begin
     red_p   <= 0;
     green_p <= 0;

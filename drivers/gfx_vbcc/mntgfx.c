@@ -25,7 +25,7 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-/* REVISION 1.8.5 */
+/* REVISION 1.9.0 */
 
 #include "mntgfx.h"
 #include "va2000.h"
@@ -46,7 +46,7 @@ static ULONG LibStart(void) {
 }
 
 static const char LibraryName[] = "mntgfx.card";
-static const char LibraryID[]   = "$VER: mntgfx.card 1.85 (2018-05-13)\r\n";
+static const char LibraryID[]   = "$VER: mntgfx.card 1.90 (2018-07-16)\r\n";
 
 struct MNTGFXBase* OpenLib( __reg("a6") struct MNTGFXBase *MNTGFXBase);
 BPTR __saveds CloseLib( __reg("a6") struct MNTGFXBase *MNTGFXBase);
@@ -211,7 +211,7 @@ int InitCard(__reg("a0") struct RTGBoard* b) {
   b->controller_type = 3;
 
   b->flags = (1<<20)|(1<<12)|(1<<26); // indisplaychain, flickerfixer, directaccess
-  b->color_formats = RTG_COLOR_FORMAT_CLUT|RTG_COLOR_FORMAT_RGB565|RTG_COLOR_FORMAT_RGB555|RTG_COLOR_FORMAT_RGB888;
+  b->color_formats = 1|2|512|1024|2048;
   b->sprite_flags = 0;
   b->bits_per_channel = 8;
 
@@ -376,20 +376,26 @@ uint16 calc_pitch_bytes(uint16 w, uint16 colormode) {
   if (colormode == MNTVA_COLOR_1BIT) {
     // monochrome, 16 pixels per word
     pitch = w>>3;
+  } else if (colormode == MNTVA_COLOR_15BIT) {
+    pitch = w<<1;
   } else {
-    pitch = pitch<<colormode;
+    pitch = w<<colormode;
   }
   return pitch;
 }
 
 uint16 rtg_to_mnt_colormode(uint16 format) {
   if (format==RTG_COLOR_FORMAT_CLUT) {
+    // format == 1
     return MNTVA_COLOR_8BIT;
-  } else if (format==9) {
+  } else if (format==9 || format==8) {
     return MNTVA_COLOR_32BIT;
   } else if (format==0) {
     return MNTVA_COLOR_1BIT;
+  } else if (format==0xb || format==0xd || format==5) {
+    return MNTVA_COLOR_15BIT;
   }
+  // format == 10
   return MNTVA_COLOR_16BIT565;
 }
 
@@ -486,32 +492,27 @@ void init_mode(__reg("a0") struct RTGBoard* b,__reg("a1")  struct ModeInfo* m,__
 
   vsync_wait(b);
 
+  //KPrintF("init_mode cf:\n");
+  //KPrintF("%lx\n",b->color_format);
+
   colormode = rtg_to_mnt_colormode(b->color_format);
 
-  registers->safe_x1 = 1;
-  if (colormode == MNTVA_COLOR_32BIT && m->width>1280) {
-    registers->safe_x1 = 0x10;
-    registers->safe_x2 = 0x300;
-    registers->fetch_preroll = 0x320;
-  } else if (colormode == MNTVA_COLOR_32BIT && m->width==1280) {
-    registers->safe_x1 = 0x10;
-    registers->safe_x2 = 0x340;
-    registers->fetch_preroll = 0x360;
-  } else if (colormode == MNTVA_COLOR_32BIT && m->width>800) {
-    registers->safe_x1 = 0x10;
-    registers->safe_x2 = 0x376;
-    registers->fetch_preroll = 0x390;
-  } else if (colormode != MNTVA_COLOR_32BIT && m->width==800) {
-    registers->safe_x2 = 0x3e0;
-    registers->fetch_preroll = 0x3f0;
-  } else if (colormode == MNTVA_COLOR_1BIT) {
-    registers->safe_x2 = 0x3e0;
-    registers->fetch_preroll = 0x3f5;
+  registers->safe_x2 = 0x1e0;
+  
+  if (colormode == MNTVA_COLOR_32BIT && m->width>=1024) {
+    registers->safe_x2 = 0x180;
+    registers->fetch_preroll = 0x180;
+  } else if (colormode == MNTVA_COLOR_16BIT565 && m->width==1280 || colormode == MNTVA_COLOR_15BIT && m->width==1280) {
+    registers->safe_x2 = 0x1d0;
+    registers->fetch_preroll = 0x1d0;
+  } else if (colormode == MNTVA_COLOR_8BIT && m->width==800) {
+    registers->safe_x2 = 0x1f0;
+    registers->fetch_preroll = 0x1f0;
   } else {
-    registers->safe_x2 = 0x3d0;
-    registers->fetch_preroll = 0x3e0;
+    registers->fetch_preroll = 0x1e0;
   }
 
+  // FIXME
   if (colormode == MNTVA_COLOR_32BIT) {
     registers->ram_fetch_delay2_max = 0xa;
   } else {
@@ -534,7 +535,6 @@ void init_mode(__reg("a0") struct RTGBoard* b,__reg("a1")  struct ModeInfo* m,__
   init_modeline(registers, w, h);
   init_mode_pitch(registers, w, colormode);
 
-  registers->margin_x = 8;
   registers->colormode = colormode;
 
   registers->scalemode = (scale<<2) | scale; // vscale|hscale
@@ -582,10 +582,10 @@ uint32 monitor_switch(__reg("a0") struct RTGBoard* b,__reg("d0")  uint16 state) 
     registers->pan_ptr_hi = 0xf8; // capture at the end of video memory
     registers->pan_ptr_lo = 0;
 
-    registers->safe_x1 = 0;
-    registers->safe_x2 = 0x220;
-    registers->fetch_preroll = 1;
-    registers->margin_x = 10;
+    //registers->safe_x1 = 0;
+    //registers->safe_x2 = 0x220;
+    //registers->fetch_preroll = 1;
+    //registers->margin_x = 10;
 
     init_modeline(registers, registers->capture_default_screen_w, registers->capture_default_screen_h);
     init_mode_pitch(registers, registers->capture_default_screen_w, MNTVA_COLOR_16BIT565);
@@ -620,8 +620,8 @@ void rect_fill(__reg("a0") struct RTGBoard* b,__reg("a1")  struct RenderInfo* r,
   uint32 color_format = b->color_format;
   uint32 offset = 0;
   
-  registers->blitter_enable = 0;
-
+  blitter_wait(b);
+  
   // no blitting in capture mode
   if (b->scratch[SCR_CAPMODE]==1) return;
   
@@ -669,12 +669,13 @@ void rect_fill(__reg("a0") struct RTGBoard* b,__reg("a1")  struct RenderInfo* r,
     if (w==0) return;
     w--;
     h--;
-  } else if (color_format==9) {
+  } else if (color_format==9 || color_format==8) {
     // true color
     x<<=1;
     w<<=1;
     h--;
     w--;
+    registers->blitter_rgb16 = color>>16;
     registers->blitter_rgb32_hi = color>>16;
     registers->blitter_rgb32_lo = color&0xffff;
     registers->blitter_colormode = MNTVA_COLOR_32BIT;
@@ -694,13 +695,39 @@ void rect_fill(__reg("a0") struct RTGBoard* b,__reg("a1")  struct RenderInfo* r,
   blitter_wait(b);
 }
 
+void copy_column(uint8* gfxmem,uint32 pitch,uint16 x,uint16 y,uint16 dx,uint16 dy,uint16 h,uint16 col) {
+  uint8* ptr_src, *ptr_dst;
+  uint16 i;
+  if (dy>y) {
+    ptr_dst = gfxmem+(dy+h-1)*pitch+dx+col;
+    ptr_src = gfxmem+( y+h-1)*pitch+ x+col;
+    for (i=0;i<h;i++) {
+      *ptr_dst=*ptr_src;
+      ptr_dst-=pitch;
+      ptr_src-=pitch;
+    }
+  } else {
+    ptr_dst = gfxmem+dy*pitch+dx+col;
+    ptr_src = gfxmem+ y*pitch+ x+col;
+    for (i=0;i<h;i++) {
+      *ptr_dst=*ptr_src;
+      ptr_dst+=pitch;
+      ptr_src+=pitch;
+    }
+  }
+}
+
 void rect_copy(__reg("a0") struct RTGBoard* b,__reg("a1")  struct RenderInfo* r,__reg("d0")  uint16 x,__reg("d1")  uint16 y,__reg("d2")  uint16 dx,__reg("d3")  uint16 dy,__reg("d4")  uint16 w,__reg("d5")  uint16 h,__reg("d6")  uint8 m,__reg("d7")  uint16 format) {
   MNTVARegs* registers = b->registers;
   uint16 pitch = 1024;
   uint32 color_format = b->color_format;
+  uint8* gfxmem = (uint8*)b->memory;
   uint32 offset = 0, y1, y3;
+  uint32 i;
+  uint8 copy_col_later = 0, reverse = 0;
+  uint16 cc_dx, cc_x, cc_dy, cc_y, cc_w, cc_h, cc_col;
 
-  registers->blitter_enable = 0;
+  blitter_wait(b);
 
   // no blitting in capture mode
   if (b->scratch[SCR_CAPMODE]==1) return;
@@ -708,58 +735,84 @@ void rect_copy(__reg("a0") struct RTGBoard* b,__reg("a1")  struct RenderInfo* r,
   if (r) {
     pitch = r->pitch;
     color_format = r->color_format;
+    gfxmem = (uint8*)r->memory;
   }
 
   registers->blitter_row_pitch = pitch>>1;
-
-  if (color_format==RTG_COLOR_FORMAT_CLUT) {
-    // fallback as long as 8-bit blitter is unstable
+  if (w<4 || h<2) {
     b->fn_rect_copy_fallback(b,r,x,y,dx,dy,w,h,m,format);
     return;
-    
-    // copy odd rows manually
-    /*if (x&1 && dx&1) {
-      ptr = gfxmem+dy*pitch+dx;
-      ptr_src = gfxmem+y*pitch+x;
-      for (i=0;i<h;i++) {
-        *ptr=*ptr_src;
-        ptr+=pitch;
-        ptr_src+=pitch;
-      }
-      x++;
-      dx++;
-      w--;
-    } else if (x&1 || dx&1) {
-      // perform the whole blit manually because we
-      // can't to byte swapping yet
+  }
+
+  if (color_format==RTG_COLOR_FORMAT_CLUT) {
+    if ((dx&1)!=(x&1)) {
+      // can only scroll odd/odd or even/even in x direction
       b->fn_rect_copy_fallback(b,r,x,y,dx,dy,w,h,m,format);
       return;
-    }*/
-
-    /*if (w&1) {
-      ptr = gfxmem+dy*pitch+dx+w-1;
-      ptr_src = gfxmem+y*pitch+x+w-1;
-      for (i=0;i<h;i++) {
-        *ptr=*ptr_src;
-        ptr+=pitch;
-        ptr_src+=pitch;
-      }
-      w--;
     }
 
-    dx/=2;
-    x/=2;
-    w/=2;
-    if (w<1) return;
+    if (dx>=x) {
+      reverse = 1;
+    }
+    
+    cc_x=x; cc_y=y; cc_dx=dx; cc_dy=dy; cc_w=w; cc_h=h;
+    if ((x&1)==0) {
+      if ((x+w-1)&1) {
+        // x even, x2 odd = nothing special
+      } else {
+        // x even, x2 odd
+        if (reverse) {
+          copy_column(gfxmem,pitch,x,y,dx,dy,h,w-1);
+        } else {
+          copy_col_later=1;
+          cc_col=w-1;
+        }
+        w--;
+      }
+    } else {
+      if ((x+w-1)&1) {
+        // x odd, x2 odd
+        if (reverse) {
+          copy_col_later=1;
+          cc_col=0;
+        } else {
+          copy_column(gfxmem,pitch,x,y,dx,dy,h,0);
+        }
+        x++;
+        dx++;
+        w--;
+      } else {
+        // x odd, x2 even
+        if (reverse) {
+          copy_column(gfxmem,pitch,x,y,dx,dy,h,w-1);
+          copy_col_later=1;
+          cc_col=0;
+        } else {
+          copy_column(gfxmem,pitch,x,y,dx,dy,h,0);
+          copy_col_later=1;
+          cc_col=w-1;
+        }
+        x++;
+        dx++;
+        w-=2;
+      }
+    }
+
+    dx>>=1;
+    x>>=1;
+    w>>=1;
+    if (w<1) return; // FIXME fallback threshold
     w--;
-    h--;*/
-  } else if (color_format==9) {
+    h--;
+  } else if (color_format==9 || color_format==8) {
+    // 32 bit
     x*=2;
     dx*=2;
     w*=2;
     w--;
     h--;
   } else {
+    // 16 bit
     w--;
     h--;
   }
@@ -805,6 +858,11 @@ void rect_copy(__reg("a0") struct RTGBoard* b,__reg("a1")  struct RenderInfo* r,
 
   registers->blitter_enable = 2;
   blitter_wait(b);
+
+  // 8 bit odd column post processing
+  if (copy_col_later) {
+    copy_column(gfxmem,pitch,cc_x,cc_y,cc_dx,cc_dy,cc_h,cc_col);
+  }
 }
 
 /*void rect_p2c(__reg("a0") struct RTGBoard* b,__reg("a1")  struct BitMap* bm,__reg("a2")  struct RenderInfo* r,__reg("d0")  uint16 x,__reg("d1")  uint16 y,__reg("d2")  uint16 dx,__reg("d3")  uint16 dy,__reg("d4")  uint16 w,__reg("d5")  uint16 h,__reg("d6")  uint8 minterm,__reg("d7")  uint8 mask) {
